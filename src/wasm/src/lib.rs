@@ -1180,6 +1180,188 @@ pub fn compute_proof_right_v2(
 }
 
 // =================================================================================================
+// Native Rust versions (for CLI use, without WASM types)
+// Same names as WASM functions but without _v2 or _wasm suffixes
+// =================================================================================================
+
+/// Native Rust version of evaluate_circuit_v2_wasm
+/// Uses the same logic as evaluate_circuit_v2_wasm, just returns Vec<u8> instead of EvaluatedCircuitV2
+pub fn evaluate_circuit(
+    circuit_bytes: &[u8],
+    ct: &[u8],
+    key_hex: &str,
+) -> Vec<u8> {
+    // Call the WASM function and convert to bytes
+    let evaluated = evaluate_circuit_v2_wasm(circuit_bytes, ct, key_hex.to_string());
+    evaluated.to_bytes()
+}
+
+/// Native Rust version of hpre_v2
+pub fn hpre(evaluated_circuit_bytes: &[u8], num_blocks: usize, challenge: usize) -> Vec<u8> {
+    hpre_v2(evaluated_circuit_bytes, num_blocks, challenge)
+}
+
+/// Native Rust version of compute_proofs_v2 (returns Rust types instead of WASM types)
+pub fn compute_proofs(
+    circuit_bytes: &[u8],
+    evaluated_circuit_bytes: &[u8],
+    ct: &[u8],
+    challenge: u32,
+) -> (Vec<u8>, Vec<Vec<u8>>, Vec<u8>, Vec<Vec<Vec<u8>>>, Vec<Vec<Vec<u8>>>, Vec<Vec<Vec<u8>>>, Vec<Vec<Vec<u8>>>) {
+    let circuit = CompiledCircuitV2::from_bytes(circuit_bytes);
+    let evaluated = EvaluatedCircuitV2::from_bytes(evaluated_circuit_bytes);
+    
+    // Split ciphertext into blocks
+    let mut ct_blocks = Vec::new();
+    let mut start = 16; // Skip IV
+    while start < ct.len() {
+        let end = usize::min(start + 64, ct.len());
+        let mut block = vec![0u8; 64];
+        block[..(end - start)].copy_from_slice(&ct[start..end]);
+        ct_blocks.push(block);
+        start = end;
+    }
+    
+    let num_blocks = circuit.num_blocks;
+    let gate_idx = (challenge as usize) - 1;
+    let gate = &circuit.gates[gate_idx];
+    let (s_in_l, not_in_l_minus_m) = split_sons_indices_v2(&gate.sons, num_blocks);
+    
+    let gate_outputs = &evaluated.values[(num_blocks as usize)..];
+    let values = get_evaluated_sons_v2(gate, gate_outputs, &ct_blocks);
+    
+    let curr_acc = acc(&evaluated.values[(num_blocks as usize)..=((num_blocks as usize + challenge as usize - 1) as usize)]);
+    
+    let encoded_gates: Vec<Vec<u8>> = circuit.gates
+        .iter()
+        .map(|g| {
+            let mut buf = [0u8; 64];
+            g.encode_into(&mut buf);
+            buf.to_vec()
+        })
+        .collect();
+    let proof1 = prove(&encoded_gates, &[gate_idx as u32]);
+    
+    let mut ct_blocks_with_iv = Vec::new();
+    ct_blocks_with_iv.push(ct[..16].to_vec());
+    ct_blocks_with_iv.extend_from_slice(&ct_blocks);
+    
+    let s_in_l_with_iv: Vec<u32> = s_in_l.iter().map(|&idx| idx + 1).collect();
+    let proof2 = prove(&ct_blocks_with_iv, &s_in_l_with_iv);
+    
+    let proof3 = prove(
+        &evaluated.values[(num_blocks as usize)..(num_blocks as usize + challenge as usize - 1) as usize],
+        &not_in_l_minus_m,
+    );
+    
+    let proof_ext = prove_ext(&evaluated.values[(num_blocks as usize)..=((num_blocks as usize + challenge as usize - 1) as usize)]);
+    
+    let mut gate_bytes = [0u8; 64];
+    gate.encode_into(&mut gate_bytes);
+    
+    (gate_bytes.to_vec(), values, curr_acc, proof1, proof2, proof3, proof_ext)
+}
+
+/// Native Rust version of compute_proofs_left_v2
+pub fn compute_proofs_left(
+    circuit_bytes: &[u8],
+    evaluated_circuit_bytes: &[u8],
+    ct: &[u8],
+    challenge: u32,
+) -> (Vec<u8>, Vec<Vec<u8>>, Vec<u8>, Vec<Vec<Vec<u8>>>, Vec<Vec<Vec<u8>>>, Vec<Vec<Vec<u8>>>) {
+    let circuit = CompiledCircuitV2::from_bytes(circuit_bytes);
+    let evaluated = EvaluatedCircuitV2::from_bytes(evaluated_circuit_bytes);
+    
+    let mut ct_blocks = Vec::new();
+    let mut start = 16;
+    while start < ct.len() {
+        let end = usize::min(start + 64, ct.len());
+        let mut block = vec![0u8; 64];
+        block[..(end - start)].copy_from_slice(&ct[start..end]);
+        ct_blocks.push(block);
+        start = end;
+    }
+    
+    let num_blocks = circuit.num_blocks;
+    let gate_idx = (challenge as usize) - 1;
+    let gate = &circuit.gates[gate_idx];
+    
+    let gate_outputs = &evaluated.values[(num_blocks as usize)..];
+    let values = get_evaluated_sons_v2(gate, gate_outputs, &ct_blocks);
+    
+    let curr_acc = acc(&evaluated.values[(num_blocks as usize)..=((num_blocks as usize + challenge as usize - 1) as usize)]);
+    
+    let encoded_gates: Vec<Vec<u8>> = circuit.gates
+        .iter()
+        .map(|g| {
+            let mut buf = [0u8; 64];
+            g.encode_into(&mut buf);
+            buf.to_vec()
+        })
+        .collect();
+    let proof1 = prove(&encoded_gates, &[gate_idx as u32]);
+    
+    let (non_constant_sons, _) = split_sons_indices_v2(&gate.sons, num_blocks);
+    let mut ct_blocks_with_iv = Vec::new();
+    ct_blocks_with_iv.push(ct[..16].to_vec());
+    ct_blocks_with_iv.extend_from_slice(&ct_blocks);
+    
+    let non_constant_sons_with_iv: Vec<u32> = non_constant_sons.iter().map(|&idx| idx + 1).collect();
+    let proof2 = prove(&ct_blocks_with_iv, &non_constant_sons_with_iv);
+    
+    let proof_ext = prove_ext(&[evaluated.values[num_blocks as usize].clone()]);
+    
+    let mut gate_bytes = [0u8; 64];
+    gate.encode_into(&mut gate_bytes);
+    
+    (gate_bytes.to_vec(), values, curr_acc, proof1, proof2, proof_ext)
+}
+
+/// Native Rust version of compute_proof_right_v2
+pub fn compute_proof_right(
+    evaluated_circuit_bytes: &[u8],
+    num_blocks: u32,
+    num_gates: u32,
+) -> Vec<Vec<Vec<u8>>> {
+    use crate::utils::die;
+    let evaluated = EvaluatedCircuitV2::from_bytes(evaluated_circuit_bytes);
+    
+    let num_blocks_usize = num_blocks as usize;
+    if num_blocks_usize >= evaluated.values.len() {
+        die(&format!(
+            "num_blocks ({}) is greater than or equal to evaluated.values.len() ({})",
+            num_blocks_usize,
+            evaluated.values.len()
+        ));
+    }
+    
+    let gate_outputs = &evaluated.values[num_blocks_usize..];
+    if gate_outputs.is_empty() {
+        die("gate_outputs is empty");
+    }
+    
+    if gate_outputs.len() != num_gates as usize {
+        die(&format!(
+            "Mismatch: gate_outputs.len() ({}) != num_gates ({})",
+            gate_outputs.len(),
+            num_gates
+        ));
+    }
+    
+    let last_gate_idx = (num_gates - 1) as u32;
+    
+    if last_gate_idx as usize >= gate_outputs.len() {
+        die(&format!(
+            "last_gate_idx ({}) is out of bounds for gate_outputs.len() ({})",
+            last_gate_idx,
+            gate_outputs.len()
+        ));
+    }
+    
+    prove(gate_outputs, &[last_gate_idx])
+}
+
+// =================================================================================================
 
 #[cfg(test)]
 mod tests {

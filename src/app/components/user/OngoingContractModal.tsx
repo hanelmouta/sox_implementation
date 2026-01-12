@@ -29,17 +29,17 @@ import {
     getDisputeDetails,
     getDisputeState,
 } from "@/app/lib/blockchain/dispute";
-import { downloadFile, fileToBytes, openFile } from "@/app/lib/helpers";
-import init, {
+import { downloadFile, hexToBytes } from "@/app/lib/helpers";
+import {
+    deriveK2HexForUser,
+    isWrappedCiphertext,
+    unwrapCiphertextBytes,
+} from "@/app/lib/cipher_wrap";
+import {
     bytes_to_hex,
     check_received_ct_key,
     compile_circuit_v2_wasm,
-    compute_proof_right_v2,
-    compute_proofs_v2,
-    compute_proofs_left_v2,
-    evaluate_circuit_v2_wasm,
     hex_to_bytes,
-    hpre_v2,
     make_argument,
 } from "@/app/lib/crypto_lib";
 
@@ -75,6 +75,8 @@ export default function OngoingContractModal({
         id,
         pk_buyer,
         pk_vendor,
+        buyer_pubkey,
+        vendor_pubkey,
         price,
         item_description,
         tip_completion,
@@ -130,6 +132,50 @@ export default function OngoingContractModal({
     
     // Vérifier si EIP-7702 est configuré
     const eip7702Configured = !!(ENTRY_POINT_V8 && EIP7702_DELEGATE);
+
+    const deriveK2Hex = () => {
+        if (!buyer_pubkey || !vendor_pubkey) {
+            throw new Error("Public keys manquantes pour déchiffrer le ciphertext.");
+        }
+        return deriveK2HexForUser({
+            contractId: id,
+            userAddress: publicKey,
+            buyerAddress: pk_buyer,
+            vendorAddress: pk_vendor,
+            buyerPubkey: buyer_pubkey,
+            vendorPubkey: vendor_pubkey,
+        });
+    };
+
+    const unwrapCiphertextIfNeeded = async (ctBytes: Uint8Array) => {
+        if (!isWrappedCiphertext(ctBytes)) {
+            return ctBytes;
+        }
+        const k2Hex = deriveK2Hex();
+        return await unwrapCiphertextBytes(ctBytes, k2Hex);
+    };
+
+    const fetchCiphertextBytes = async () => {
+        const response = await fetch(`/api/files/${id}`, {
+            method: "GET",
+            headers: {
+                "Content-Type": "application/json",
+            },
+        });
+        if (!response.ok) {
+            const errorPayload = await response.json().catch(() => ({}));
+            throw new Error(
+                errorPayload?.error ||
+                    `Impossible de télécharger le fichier (HTTP ${response.status})`
+            );
+        }
+        const fileData = await response.json();
+        if (!fileData?.file) {
+            throw new Error("Fichier chiffré introuvable (réponse vide).");
+        }
+        const rawBytes = hexToBytes(fileData.file);
+        return await unwrapCiphertextIfNeeded(rawBytes);
+    };
 
     // Fonction pour rafraîchir les données du contrat
     const refreshContractData = async () => {
@@ -575,28 +621,7 @@ export default function OngoingContractModal({
 
     const clickDecryptFile = async () => {
         await init();
-        let file: File | null = null;
-        // if (confirm("Do you want to select a local file ?")) {
-        //     file = await openFile();
-        // }
-
-        let ct: Uint8Array | null = null;
-        if (file) {
-            ct = await fileToBytes(file);
-        } else {
-            ct = hex_to_bytes(
-                (
-                    await (
-                        await fetch(`/api/files/${id}`, {
-                            method: "GET",
-                            headers: {
-                                "Content-Type": "application/json",
-                            },
-                        })
-                    ).json()
-                ).file
-            );
-        }
+        const ct = await fetchCiphertextBytes();
 
         try {
             const { success, decrypted_file } = check_received_ct_key(
@@ -628,24 +653,7 @@ export default function OngoingContractModal({
 
     const clickDownloadCiphertext = async () => {
         try {
-            const response = await fetch(`/api/files/${id}`, {
-                method: "GET",
-                headers: {
-                    "Content-Type": "application/json",
-                },
-            });
-            if (!response.ok) {
-                const errorPayload = await response.json().catch(() => ({}));
-                throw new Error(
-                    errorPayload?.error ||
-                        `Impossible de télécharger le fichier (HTTP ${response.status})`
-                );
-            }
-            const fileData = await response.json();
-            if (!fileData?.file) {
-                throw new Error("Fichier chiffré introuvable (réponse vide).");
-            }
-            const ctBytes = hex_to_bytes(fileData.file);
+            const ctBytes = await fetchCiphertextBytes();
             downloadFile(ctBytes, `contract_${id}_ciphertext.enc`);
         } catch (error: any) {
             const errorMessage = error?.message || error?.toString() || "Erreur inconnue";
@@ -667,28 +675,7 @@ export default function OngoingContractModal({
 
     const clickBuyerPostArgument = async () => {
         await init();
-
-        let file;
-        let ct: Uint8Array | undefined = undefined;
-        if (confirm("Do you want to select a file ?")) {
-            file = await openFile();
-        }
-        if (file) ct = await fileToBytes(file);
-
-        if (!ct) {
-            ct = hex_to_bytes(
-                (
-                    await (
-                        await fetch(`/api/files/${id}`, {
-                            method: "GET",
-                            headers: {
-                                "Content-Type": "application/json",
-                            },
-                        })
-                    ).json()
-                ).file
-            );
-        }
+        const ct = await fetchCiphertextBytes();
 
         const argument = make_argument(ct, item_description, opening_value);
 
@@ -707,28 +694,7 @@ export default function OngoingContractModal({
 
     const clickVendorPostArgument = async () => {
         await init();
-
-        let file;
-        let ct: Uint8Array | undefined = undefined;
-        // if (confirm("Do you want to select a file ?")) {
-        //     file = await openFile();
-        // }
-        // if (file) ct = await fileToBytes(file);
-
-        if (!ct) {
-            ct = hex_to_bytes(
-                (
-                    await (
-                        await fetch(`/api/files/${id}`, {
-                            method: "GET",
-                            headers: {
-                                "Content-Type": "application/json",
-                            },
-                        })
-                    ).json()
-                ).file
-            );
-        }
+        const ct = await fetchCiphertextBytes();
 
         const argument = make_argument(ct, item_description, opening_value);
 
@@ -814,37 +780,68 @@ export default function OngoingContractModal({
     };
 
     const clickRespondChallenge = async () => {
-        await init();
-
         const challenge = await getChallenge(dispute_smart_contract!);
         const evaluated_circuit = await getEvaluatedCircuit();
+        const evaluated_circuit_hex = bytes_to_hex(evaluated_circuit);
 
-        const response = hpre_v2(evaluated_circuit, num_blocks, Number(challenge));
+        // Call API instead of WASM
+        const response = await fetch("/api/hpre", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+                evaluated_circuit_hex,
+                num_blocks,
+                challenge: Number(challenge),
+                contractId: id,
+            }),
+        });
+
+        if (!response.ok) {
+            const error = await response.json();
+            throw new Error(error.error || "Failed to compute hpre");
+        }
+
+        const { hpre_hex } = await response.json();
+        const responseBytes = hex_to_bytes(hpre_hex);
 
         await respondChallenge(
             publicKey,
             dispute_smart_contract!,
-            bytes_to_hex(response)
+            hpre_hex.startsWith("0x") ? hpre_hex : "0x" + hpre_hex
         );
         onClose();
         alert(`Response sent for challenge ${challenge}`);
     };
 
     const clickGiveOpinion = async () => {
-        await init();
-
         const challenge = await getChallenge(dispute_smart_contract!);
         const evaluated_circuit = await getEvaluatedCircuit();
+        const evaluated_circuit_hex = bytes_to_hex(evaluated_circuit);
 
-        const computedResponse = hpre_v2(
-            evaluated_circuit,
-            num_blocks,
-            Number(challenge)
-        );
+        // Call API instead of WASM
+        const response = await fetch("/api/hpre", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+                evaluated_circuit_hex,
+                num_blocks,
+                challenge: Number(challenge),
+                contractId: id,
+            }),
+        });
+
+        if (!response.ok) {
+            const error = await response.json();
+            throw new Error(error.error || "Failed to compute hpre");
+        }
+
+        const { hpre_hex } = await response.json();
+        const computedResponseHex = hpre_hex.startsWith("0x") ? hpre_hex : "0x" + hpre_hex;
+        
         const latestResponse = await getLatestChallengeResponse(
             dispute_smart_contract!
         );
-        const opinion = bytes_to_hex(computedResponse) == latestResponse;
+        const opinion = computedResponseHex == latestResponse;
 
         await giveOpinion(publicKey, dispute_smart_contract!, opinion);
         if (opinion) {
@@ -866,10 +863,6 @@ export default function OngoingContractModal({
             
             console.log(`📊 État actuel du contrat: ${actualState} (état local: ${state})`);
             
-            console.log("🔧 Initialisation WASM...");
-            await init();
-            console.log("✅ WASM initialisé");
-            
             console.log("📦 Récupération des données (getLargeData)...");
             const { ct, circuit, evaluated_circuit } = await getLargeData();
             console.log("✅ Données récupérées");
@@ -880,19 +873,58 @@ export default function OngoingContractModal({
 
             if (actualState == 2) {
                 console.log("📤 Envoi des preuves (état 2: WaitVendorData)");
+                
+                // Convert to hex for API
+                const circuit_hex = bytes_to_hex(circuit);
+                const ct_hex = bytes_to_hex(ct);
+                const evaluated_circuit_hex = bytes_to_hex(evaluated_circuit);
+                
+                // Call API instead of WASM
+                const response = await fetch("/api/proofs/compute", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({
+                        state: 2,
+                        contractId: id,
+                        num_blocks,
+                        num_gates,
+                        circuit_hex,
+                        ct_hex,
+                        evaluated_circuit_hex,
+                        challenge: Number(challenge),
+                    }),
+                });
+
+                if (!response.ok) {
+                    const error = await response.json();
+                    throw new Error(error.error || "Failed to compute proofs");
+                }
+
                 const {
-                    gate_bytes,
-                    values,
-                    curr_acc,
-                    proof1,
-                    proof2,
-                    proof3,
-                    proof_ext,
-                } = compute_proofs_v2(
-                    circuit,
-                    evaluated_circuit,
-                    ct,
-                    Number(challenge)
+                    gate_bytes: gate_bytes_array,
+                    values: values_array,
+                    curr_acc: curr_acc_array,
+                    proof1: proof1_array,
+                    proof2: proof2_array,
+                    proof3: proof3_array,
+                    proof_ext: proof_ext_array,
+                } = await response.json();
+                
+                // Convert arrays back to Uint8Array format
+                const gate_bytes = new Uint8Array(gate_bytes_array);
+                const values = values_array.map((v: number[]) => new Uint8Array(v));
+                const curr_acc = new Uint8Array(curr_acc_array);
+                const proof1 = proof1_array.map((layer: number[][]) => 
+                    layer.map((item: number[]) => new Uint8Array(item))
+                );
+                const proof2 = proof2_array.map((layer: number[][]) => 
+                    layer.map((item: number[]) => new Uint8Array(item))
+                );
+                const proof3 = proof3_array.map((layer: number[][]) => 
+                    layer.map((item: number[]) => new Uint8Array(item))
+                );
+                const proof_ext = proof_ext_array.map((layer: number[][]) => 
+                    layer.map((item: number[]) => new Uint8Array(item))
                 );
                 if (gate_bytes.length !== 64) {
                     throw new Error(
@@ -924,13 +956,55 @@ export default function OngoingContractModal({
                 alert(`✅ Preuves envoyées et confirmées!\n\nHash: ${userOpHash.slice(0, 20)}...`);
             } else if (actualState == 3) {
                 console.log("📤 Envoi des preuves left (état 3: WaitVendorDataLeft)");
-                const { gate_bytes, values, curr_acc, proof1, proof2, proof_ext } =
-                    compute_proofs_left_v2(
-                        circuit,
-                        evaluated_circuit,
-                        ct,
-                        Number(challenge)
-                    );
+                
+                // Convert to hex for API
+                const circuit_hex = bytes_to_hex(circuit);
+                const ct_hex = bytes_to_hex(ct);
+                const evaluated_circuit_hex = bytes_to_hex(evaluated_circuit);
+                
+                // Call API instead of WASM
+                const response = await fetch("/api/proofs/compute", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({
+                        state: 3,
+                        contractId: id,
+                        num_blocks,
+                        num_gates,
+                        circuit_hex,
+                        ct_hex,
+                        evaluated_circuit_hex,
+                        challenge: Number(challenge),
+                    }),
+                });
+
+                if (!response.ok) {
+                    const error = await response.json();
+                    throw new Error(error.error || "Failed to compute proofs left");
+                }
+
+                const {
+                    gate_bytes: gate_bytes_array,
+                    values: values_array,
+                    curr_acc: curr_acc_array,
+                    proof1: proof1_array,
+                    proof2: proof2_array,
+                    proof_ext: proof_ext_array,
+                } = await response.json();
+                
+                // Convert arrays back to Uint8Array format
+                const gate_bytes = new Uint8Array(gate_bytes_array);
+                const values = values_array.map((v: number[]) => new Uint8Array(v));
+                const curr_acc = new Uint8Array(curr_acc_array);
+                const proof1 = proof1_array.map((layer: number[][]) => 
+                    layer.map((item: number[]) => new Uint8Array(item))
+                );
+                const proof2 = proof2_array.map((layer: number[][]) => 
+                    layer.map((item: number[]) => new Uint8Array(item))
+                );
+                const proof_ext = proof_ext_array.map((layer: number[][]) => 
+                    layer.map((item: number[]) => new Uint8Array(item))
+                );
                 if (gate_bytes.length !== 64) {
                     throw new Error(
                         `InvalidGateBytes: gate_bytes.length=${gate_bytes.length}, attendu 64`
@@ -1014,13 +1088,34 @@ export default function OngoingContractModal({
                     
                     console.log(`📊 evaluated_circuit_bytes length: ${evaluated_circuit_bytes.length} bytes`);
                     
-                    console.log("🔧 Calcul de la preuve avec compute_proof_right_v2...");
-                    let proof;
-                    try {
-                        proof = compute_proof_right_v2(
-                            evaluated_circuit_bytes,
+                    console.log("🔧 Calcul de la preuve avec API (state 4)...");
+                    const evaluated_circuit_hex = bytes_to_hex(evaluated_circuit_bytes);
+                    
+                    // Call API instead of WASM
+                    const response = await fetch("/api/proofs/compute", {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({
+                            state: 4,
+                            contractId: id,
                             num_blocks,
-                            num_gates
+                            num_gates,
+                            evaluated_circuit_hex,
+                        }),
+                    });
+
+                    if (!response.ok) {
+                        const error = await response.json();
+                        throw new Error(error.error || "Failed to compute proof right");
+                    }
+
+                    const { proof: proof_hex_array } = await response.json();
+                    
+                    // Convert hex strings back to Uint8Array[][]
+                    let proof: Uint8Array[][];
+                    try {
+                        proof = proof_hex_array.map((layer: string[]) =>
+                            layer.map((item: string) => hex_to_bytes(item))
                         );
                         console.log("✅ Preuve calculée");
                     } catch (proofError: any) {
@@ -1149,31 +1244,7 @@ export default function OngoingContractModal({
     };
 
     const getEvaluatedCircuit = async () => {
-        let ct_file;
-
-        if (confirm("Do you want to select the encrypted file (ciphertext) ?")) {
-            ct_file = await openFile();
-        }
-
-        let ct;
-        
-        if (ct_file) {
-            ct = await fileToBytes(ct_file);
-        } else {
-            // Fallback: utiliser le ciphertext depuis l'API
-            ct = hex_to_bytes(
-                (
-                    await (
-                        await fetch(`/api/files/${id}`, {
-                            method: "GET",
-                            headers: {
-                                "Content-Type": "application/json",
-                            },
-                        })
-                    ).json()
-                ).file
-            );
-        }
+        const ct = await fetchCiphertextBytes();
 
         // Toujours compiler le circuit depuis le ciphertext (pas de sélection de circuit)
         const circuit = compile_circuit_v2_wasm(
@@ -1181,11 +1252,29 @@ export default function OngoingContractModal({
             item_description
         );
 
-        const evaluated_circuit = evaluate_circuit_v2_wasm(
-            circuit,
-            ct!,
-            key
-        ).to_bytes();
+        // Call API instead of WASM
+        const circuit_hex = bytes_to_hex(circuit);
+        const ct_hex = bytes_to_hex(ct!);
+        const key_hex = key.startsWith("0x") ? key : "0x" + key;
+        
+        const response = await fetch("/api/circuit/evaluate", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+                circuit_hex,
+                ct_hex,
+                key_hex,
+                contractId: id,
+            }),
+        });
+
+        if (!response.ok) {
+            const error = await response.json();
+            throw new Error(error.error || "Failed to evaluate circuit");
+        }
+
+        const { evaluated_circuit_hex } = await response.json();
+        const evaluated_circuit = hex_to_bytes(evaluated_circuit_hex);
         // if (confirm("Save evaluated circuit ?"))
         //     await downloadFile(evaluated_circuit, "evaluated_circuit.bin");
 
@@ -1195,30 +1284,8 @@ export default function OngoingContractModal({
     // Prompt user to get encrypted file (ciphertext)
     // Le circuit et l'evaluated_circuit seront calculés automatiquement
     const getLargeData = async () => {
-        let ct_file: File | null = null;
         let ct: Uint8Array;
-
-        if (confirm("Do you want to select the encrypted file (ciphertext) ?")) {
-            ct_file = await openFile();
-        }
-
-        if (ct_file) {
-            ct = await fileToBytes(ct_file);
-        } else {
-            // Fallback: récupérer depuis l'API (correspond au commitment initial)
-            ct = hex_to_bytes(
-                (
-                    await (
-                        await fetch(`/api/files/${id}`, {
-                            method: "GET",
-                            headers: {
-                                "Content-Type": "application/json",
-                            },
-                        })
-                    ).json()
-                ).file
-            );
-        }
+        ct = await fetchCiphertextBytes();
 
         // Compiler le circuit automatiquement
         const circuit = compile_circuit_v2_wasm(
@@ -1226,12 +1293,29 @@ export default function OngoingContractModal({
             item_description
         );
 
-        // Évaluer le circuit automatiquement avec la clé
-        const evaluated_circuit = evaluate_circuit_v2_wasm(
-            circuit,
-            ct,
-            key
-        ).to_bytes();
+        // Évaluer le circuit automatiquement avec la clé via API
+        const circuit_hex = bytes_to_hex(circuit);
+        const ct_hex = bytes_to_hex(ct);
+        const key_hex = key.startsWith("0x") ? key : "0x" + key;
+        
+        const response = await fetch("/api/circuit/evaluate", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+                circuit_hex,
+                ct_hex,
+                key_hex,
+                contractId: id,
+            }),
+        });
+
+        if (!response.ok) {
+            const error = await response.json();
+            throw new Error(error.error || "Failed to evaluate circuit");
+        }
+
+        const { evaluated_circuit_hex } = await response.json();
+        const evaluated_circuit = hex_to_bytes(evaluated_circuit_hex);
 
         return { ct, circuit, evaluated_circuit };
     };
