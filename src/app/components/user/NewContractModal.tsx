@@ -7,6 +7,7 @@ import FormTextField from "../common/FormTextField";
 import FormSelect from "../common/FormSelect";
 import FormFileInput from "../common/FormFileInput";
 import { isAddress } from "ethers";
+import { deriveK2HexForUser, getPublicKeyForAddress } from "@/app/lib/cipher_wrap";
 
 interface NewContractModalProps {
     onClose: () => void;
@@ -80,9 +81,21 @@ export default function NewContractModal({
                 return;
             }
 
+            let buyerPubkey: string | null = null;
+            let vendorPubkey: string | null = null;
+            try {
+                buyerPubkey = getPublicKeyForAddress(buyerPk);
+                vendorPubkey = getPublicKeyForAddress(vendorPk);
+            } catch (e: any) {
+                console.warn("Impossible de dériver les public keys:", e);
+            }
+
             // Si on est dans l'app desktop Electron, utiliser le résultat déjà pré-calculé
             const anyWindow: any = typeof window !== "undefined" ? window : {};
             if (anyWindow.electronAPI && typeof anyWindow.electronAPI.precompute === "function") {
+                if (!buyerPubkey || !vendorPubkey) {
+                    throw new Error("Public keys manquantes pour le chiffrement K2.");
+                }
                 // Si l'utilisateur n'a pas encore cliqué sur "Choisir le fichier",
                 // on lance automatiquement le flux de sélection + calcul ici.
                 let preOut = preOutElectron;
@@ -103,6 +116,8 @@ export default function NewContractModal({
                         preOut,
                         pk_buyer: buyerPk,
                         pk_vendor: vendorPk,
+                        buyer_pubkey: buyerPubkey,
+                        vendor_pubkey: vendorPubkey,
                         price,
                         tip_completion: tipCompletion,
                         tip_dispute: tipDispute,
@@ -176,9 +191,19 @@ export default function NewContractModal({
                     throw new Error("electronAPI.uploadCiphertext non disponible.");
                 }
 
+                const k2Hex = deriveK2HexForUser({
+                    contractId: id,
+                    userAddress: buyerPk,
+                    buyerAddress: buyerPk,
+                    vendorAddress: vendorPk,
+                    buyerPubkey,
+                    vendorPubkey,
+                });
+
                 const uploadResult = await anyWindow.electronAPI.uploadCiphertext({
                     filePath: preOut.ciphertext_path,
                     contractId: id,
+                    encryptionKeyHex: k2Hex,
                 });
                 if (!uploadResult?.success) {
                     const uploadError =
@@ -214,6 +239,12 @@ export default function NewContractModal({
             formData.append("protocol_version", version);
             formData.append("timeout_delay", timeoutDelay);
             formData.append("algorithm_suite", algorithms);
+            if (buyerPubkey) {
+                formData.append("buyer_pubkey", buyerPubkey);
+            }
+            if (vendorPubkey) {
+                formData.append("vendor_pubkey", vendorPubkey);
+            }
             formData.append("file", file[0]);
 
             const response_raw = await fetch("/api/precontracts", {

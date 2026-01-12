@@ -11,6 +11,8 @@ export type Contract = {
     id: number;
     pk_buyer: string;
     pk_vendor: string;
+    buyer_pubkey?: string | null;
+    vendor_pubkey?: string | null;
     price: number;
     item_description: string;
     tip_completion: number;

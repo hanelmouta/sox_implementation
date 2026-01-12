@@ -164,6 +164,8 @@ export async function PUT(req: Request) {
                 data = {
                     pk_buyer: parsed.fields.pk_buyer,
                     pk_vendor: parsed.fields.pk_vendor,
+                    buyer_pubkey: parsed.fields.buyer_pubkey,
+                    vendor_pubkey: parsed.fields.vendor_pubkey,
                     price: parsed.fields.price,
                     tip_completion: parsed.fields.tip_completion,
                     tip_dispute: parsed.fields.tip_dispute,
@@ -244,6 +246,8 @@ export async function PUT(req: Request) {
                 opening_value: preOut.commitment_o_hex || preOut.opening_value || "",
                 pk_buyer: data.pk_buyer,
                 pk_vendor: data.pk_vendor,
+                buyer_pubkey: data.buyer_pubkey || null,
+                vendor_pubkey: data.vendor_pubkey || null,
                 price: data.price,
                 num_blocks: preOut.num_blocks || 0,
                 num_gates: preOut.num_gates || 0,
@@ -268,13 +272,13 @@ export async function PUT(req: Request) {
         try {
             stmt = db.prepare(`INSERT INTO contracts (
                 item_description, opening_value,
-                pk_buyer, pk_vendor, price, num_blocks, 
+                pk_buyer, pk_vendor, buyer_pubkey, vendor_pubkey, price, num_blocks, 
                 num_gates, commitment, tip_completion, tip_dispute,
                 protocol_version, timeout_delay, algorithm_suite,
                 accepted
             ) VALUES (
                 ?, ?,
-                ?, ?, ?, ?,
+                ?, ?, ?, ?, ?, ?,
                 ?, ?, ?, ?,
                 ?, ?, ?,
                 0
@@ -284,6 +288,8 @@ export async function PUT(req: Request) {
                 contractData.opening_value,
                 contractData.pk_buyer,
                 contractData.pk_vendor,
+                contractData.buyer_pubkey,
+                contractData.vendor_pubkey,
                 contractData.price,
                 contractData.num_blocks,
                 contractData.num_gates,

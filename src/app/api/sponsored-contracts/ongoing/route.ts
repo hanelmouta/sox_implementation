@@ -8,6 +8,8 @@ export async function GET(req: NextRequest) {
             id,
             pk_buyer,
             pk_vendor,
+            buyer_pubkey,
+            vendor_pubkey,
             price,
             item_description,
             tip_completion,

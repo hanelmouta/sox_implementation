@@ -3,25 +3,30 @@
 import Modal from "../common/Modal";
 import Button from "../common/Button";
 import { Contract } from "./NonAcceptedPrecontractsListView";
-import init from "@/app/lib/crypto_lib";
-import { downloadFile, hexToBytes } from "@/app/lib/helpers";
+import init, { check_precontract } from "@/app/lib/crypto_lib";
+import { deriveK2HexForUser, isWrappedCiphertext, unwrapCiphertextBytes } from "@/app/lib/cipher_wrap";
+import { bytesToHex, downloadFile, hexToBytes } from "@/app/lib/helpers";
 
 const BLOCK_SIZE = 64;
 
 interface NonAcceptedPrecontractModalProps {
     onClose: () => void;
     contract?: Contract;
+    publicKey: string;
 }
 
 export default function NonAcceptedPrecontractModal({
     onClose,
     contract,
+    publicKey,
 }: NonAcceptedPrecontractModalProps) {
     if (!contract) return;
     const {
         id,
         pk_buyer,
         pk_vendor,
+        buyer_pubkey,
+        vendor_pubkey,
         item_description,
         price,
         tip_completion,
@@ -36,83 +41,78 @@ export default function NonAcceptedPrecontractModal({
         optimistic_smart_contract,
     } = contract;
 
+    const unwrapCiphertextIfNeeded = async (ctBytes: Uint8Array) => {
+        if (!isWrappedCiphertext(ctBytes)) {
+            return ctBytes;
+        }
+        const k2Hex = deriveK2HexForUser({
+            contractId: id,
+            userAddress: publicKey,
+            buyerAddress: pk_buyer,
+            vendorAddress: pk_vendor,
+            buyerPubkey: buyer_pubkey,
+            vendorPubkey: vendor_pubkey,
+        });
+        return await unwrapCiphertextBytes(ctBytes, k2Hex);
+    };
+
+    const normalizeHex = (value: string) =>
+        value?.startsWith("0x") ? value.slice(2) : value;
+
     const handleVerifyCommitment = async () => {
         try {
-        await init();
+            await init();
 
-            const response = await fetch("/api/precontracts/verify", {
-                method: "POST",
+            const fileResponse = await fetch(`/api/files/${id}`, {
+                method: "GET",
                 headers: {
                     "Content-Type": "application/json",
                 },
-                body: JSON.stringify({ id }),
             });
 
-            // Vérifier le Content-Type pour s'assurer que c'est du JSON
-            const contentType = response.headers.get("content-type") || "";
-            const text = await response.text();
-
-            if (!response.ok) {
-                // Si ce n'est pas OK, essayer de parser le JSON pour obtenir le message d'erreur
-                let errorMsg = `Erreur HTTP ${response.status}`;
-                if (contentType.includes("application/json")) {
-                    try {
-                        const errorJson = JSON.parse(text);
-                        errorMsg = errorJson.error || errorMsg;
-                    } catch (e) {
-                        // Si on ne peut pas parser, utiliser le texte brut
-                        errorMsg = text ? text.slice(0, 200) : errorMsg;
-                    }
-                } else {
-                    // Si ce n'est pas du JSON, utiliser le texte brut (truncated)
-                    errorMsg = text ? text.slice(0, 200) : errorMsg;
-                }
-                console.error("Erreur /api/precontracts/verify:", text);
-                throw new Error(errorMsg);
-            }
-
-            if (!text) {
-                throw new Error("Réponse vide de /api/precontracts/verify");
-            }
-
-            // Maintenant parser le JSON seulement si la réponse est OK
-            let parsed: any;
-            try {
-                parsed = JSON.parse(text);
-            } catch (e) {
-                console.error(
-                    "Réponse non JSON de /api/precontracts/verify:",
-                    text
-                );
+            if (!fileResponse.ok) {
+                const errorPayload = await fileResponse.json().catch(() => ({}));
                 throw new Error(
-                    `Réponse invalide de /api/precontracts/verify (attendu JSON): ${text.slice(
-                        0,
-                        200
-                    )}`
+                    errorPayload?.error ||
+                        `Impossible de télécharger le fichier (HTTP ${fileResponse.status})`
                 );
             }
 
-            const { success, h_circuit_hex, h_ct_hex } = parsed;
+            const fileData = await fileResponse.json();
+            if (!fileData?.file) {
+                throw new Error("Fichier chiffré introuvable (réponse vide).");
+            }
+            const ctBytes = hexToBytes(fileData.file);
+            const unwrapped = await unwrapCiphertextIfNeeded(ctBytes);
 
-        if (success) {
-            if (
-                confirm(
-                    "Commitment is correct! Do you want to save the encrypted file ?"
-                )
-            ) {
-                    // On peut plus tard renvoyer ct ou un lien vers ct depuis le backend
+            const result = check_precontract(
+                normalizeHex(item_description),
+                normalizeHex(commitment),
+                normalizeHex(opening_value),
+                unwrapped
+            );
+
+            const success = result.success;
+            const hCircuitBytes = new Uint8Array(result.h_circuit);
+            const hCtBytes = new Uint8Array(result.h_ct);
+            const h_circuit_hex = bytesToHex(hCircuitBytes);
+            const h_ct_hex = bytesToHex(hCtBytes);
+
+            if (success) {
+                if (
+                    confirm(
+                        "Commitment is correct! Do you want to save the encrypted file ?"
+                    )
+                ) {
                     alert(
                         "Commitment correct. Récupération du fichier chiffré à implémenter."
                     );
-            }
+                }
 
-                localStorage.setItem(
-                    `h_circuit_${id}`,
-                    h_circuit_hex
-                );
+                localStorage.setItem(`h_circuit_${id}`, h_circuit_hex);
                 localStorage.setItem(`h_ct_${id}`, h_ct_hex);
-        } else {
-            alert("!!! Commitment doesn't match the received file !!!");
+            } else {
+                alert("!!! Commitment doesn't match the received file !!!");
             }
         } catch (e: any) {
             console.error("Erreur lors de la vérification du commitment:", e);
@@ -148,7 +148,8 @@ export default function NonAcceptedPrecontractModal({
                     const fileData = await fileResponse.json();
                     if (fileData.file) {
                         const ctBytes = hexToBytes(fileData.file);
-                        downloadFile(ctBytes, `contract_${id}_ciphertext.enc`);
+                        const unwrapped = await unwrapCiphertextIfNeeded(ctBytes);
+                        downloadFile(unwrapped, `contract_${id}_ciphertext.enc`);
                         console.log(`✅ Ciphertext téléchargé pour le contrat ${id}`);
                     }
                 } else {

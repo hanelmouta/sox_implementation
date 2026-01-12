@@ -9,6 +9,8 @@ CREATE TABLE contracts (
     -- contract elements
     pk_buyer TEXT NOT NULL,
     pk_vendor TEXT NOT NULL,
+    buyer_pubkey TEXT,
+    vendor_pubkey TEXT,
     price NUMBER NOT NULL,
     num_blocks INTEGER,
     num_gates INTEGER,

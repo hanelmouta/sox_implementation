@@ -8,30 +8,50 @@ export async function GET(
     req: Request,
     { params }: { params: Promise<{ id: string }> }
 ) {
-    const { id } = await params;
-    const fileName = `argument_vendor_${id}.bin`;
-    const module = readFileSync(`${WASM_PATH}crypto_lib_bg.wasm`);
-    initSync({ module: module });
+    try {
+        const { id } = await params;
+        const fileName = `argument_vendor_${id}.bin`;
+        
+        // Vérifier si le fichier existe
+        const filePath = `${UPLOADS_PATH}${fileName}`;
+        let argument: Buffer;
+        try {
+            argument = readFileSync(filePath);
+        } catch (fileError) {
+            return NextResponse.json(
+                { error: `Argument file not found for contract ${id}` },
+                { status: 404 }
+            );
+        }
 
-    const argument = readFileSync(`${UPLOADS_PATH}${fileName}`);
+        const module = readFileSync(`${WASM_PATH}crypto_lib_bg.wasm`);
+        initSync({ module: module });
 
-    const stmt = db.prepare(
-        "SELECT item_description FROM contracts WHERE id = ?"
-    );
-    const resp = stmt.all(id);
+        const stmt = db.prepare(
+            "SELECT item_description FROM contracts WHERE id = ?"
+        );
+        const resp = stmt.all(id);
 
-    if (!resp) {
+        if (!resp || resp.length === 0) {
+            return NextResponse.json(
+                { error: `Contract ${id} not found in database` },
+                { status: 404 }
+            );
+        }
+
+        const { item_description } = resp[0] as { item_description: string };
+
         return NextResponse.json({
-            error: "Not found",
+            argument: bytes_to_hex(argument),
+            description: item_description,
         });
+    } catch (error: any) {
+        console.error("Error in GET /api/arguments/vendor/[id]:", error);
+        return NextResponse.json(
+            { error: error?.message || "Internal server error" },
+            { status: 500 }
+        );
     }
-
-    const { item_description } = resp[0] as { item_description: string };
-
-    return NextResponse.json({
-        argument: bytes_to_hex(argument),
-        description: item_description,
-    });
 }
 
 export async function POST(

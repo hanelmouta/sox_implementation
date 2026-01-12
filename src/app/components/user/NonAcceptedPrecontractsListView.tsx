@@ -8,6 +8,8 @@ export type Contract = {
     id: number;
     pk_buyer: string;
     pk_vendor: string;
+    buyer_pubkey?: string | null;
+    vendor_pubkey?: string | null;
     item_description: string;
     price: number;
     tip_completion: number;
@@ -99,6 +101,7 @@ export default function NonAcceptedPrecontractsListView({
                 <NonAcceptedPrecontractModal
                     onClose={() => showModal(false)}
                     contract={displayedContract}
+                    publicKey={publicKey}
                 ></NonAcceptedPrecontractModal>
             )}
         </>

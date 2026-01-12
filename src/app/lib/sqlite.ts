@@ -43,6 +43,8 @@ try {
                 opening_value TEXT NOT NULL,
                 pk_buyer TEXT NOT NULL,
                 pk_vendor TEXT NOT NULL,
+                buyer_pubkey TEXT,
+                vendor_pubkey TEXT,
                 price NUMBER NOT NULL,
                 num_blocks INTEGER,
                 num_gates INTEGER,
@@ -102,6 +104,21 @@ try {
     // Colonne existe déjà ou autre erreur
     if (!e.message?.includes("duplicate column name")) {
         console.warn("Avertissement lors de l'ajout de session_key_address:", e.message);
+    }
+}
+
+try {
+    db.exec("ALTER TABLE contracts ADD COLUMN buyer_pubkey TEXT");
+} catch (e: any) {
+    if (!e.message?.includes("duplicate column name")) {
+        console.warn("Avertissement lors de l'ajout de buyer_pubkey:", e.message);
+    }
+}
+try {
+    db.exec("ALTER TABLE contracts ADD COLUMN vendor_pubkey TEXT");
+} catch (e: any) {
+    if (!e.message?.includes("duplicate column name")) {
+        console.warn("Avertissement lors de l'ajout de vendor_pubkey:", e.message);
     }
 }
 

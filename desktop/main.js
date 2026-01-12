@@ -3,6 +3,9 @@ const path = require('path');
 const fs = require('fs');
 const http = require('http');
 const https = require('https');
+const crypto = require('crypto');
+const os = require('os');
+const { pipeline } = require('stream/promises');
 const { spawn } = require('child_process');
 
 let mainWindow;
@@ -108,7 +111,32 @@ function getApiBaseUrl() {
     return process.env.NEXTJS_URL || 'http://localhost:3000';
 }
 
-async function uploadCiphertext(filePath, contractId) {
+async function encryptCiphertextForUpload(filePath, encryptionKeyHex) {
+    const keyHex = (encryptionKeyHex || '').replace(/^0x/, '');
+    const key = Buffer.from(keyHex, 'hex');
+    if (key.length !== 32) {
+        throw new Error('Invalid encryption key length for K2 (expected 32 bytes).');
+    }
+
+    const iv = crypto.randomBytes(12);
+    const header = Buffer.concat([Buffer.from('SOX2'), iv]);
+    const tempPath = path.join(
+        os.tmpdir(),
+        `sox_cipher_${Date.now()}_${Math.random().toString(16).slice(2)}.enc`
+    );
+
+    const cipher = crypto.createCipheriv('aes-256-gcm', key, iv);
+    const output = fs.createWriteStream(tempPath);
+    output.write(header);
+
+    await pipeline(fs.createReadStream(filePath), cipher, output);
+    const tag = cipher.getAuthTag();
+    fs.appendFileSync(tempPath, tag);
+
+    return tempPath;
+}
+
+async function uploadCiphertext(filePath, contractId, encryptionKeyHex) {
     if (!filePath || !contractId) {
         throw new Error('Missing filePath or contractId');
     }
@@ -116,44 +144,61 @@ async function uploadCiphertext(filePath, contractId) {
         throw new Error(`Ciphertext file not found: ${filePath}`);
     }
 
+    let uploadPath = filePath;
+    let tempPath = null;
+    if (encryptionKeyHex) {
+        tempPath = await encryptCiphertextForUpload(filePath, encryptionKeyHex);
+        uploadPath = tempPath;
+    }
+
     const url = new URL(`/api/files/${contractId}`, getApiBaseUrl());
-    const stat = fs.statSync(filePath);
+    const stat = fs.statSync(uploadPath);
     const transport = url.protocol === 'https:' ? https : http;
 
-    return new Promise((resolve, reject) => {
-        const req = transport.request(
-            {
-                method: 'PUT',
-                hostname: url.hostname,
-                port: url.port || (url.protocol === 'https:' ? 443 : 80),
-                path: url.pathname + url.search,
-                headers: {
-                    'Content-Type': 'application/octet-stream',
-                    'Content-Length': stat.size,
+    try {
+        return await new Promise((resolve, reject) => {
+            const req = transport.request(
+                {
+                    method: 'PUT',
+                    hostname: url.hostname,
+                    port: url.port || (url.protocol === 'https:' ? 443 : 80),
+                    path: url.pathname + url.search,
+                    headers: {
+                        'Content-Type': 'application/octet-stream',
+                        'Content-Length': stat.size,
+                    },
                 },
-            },
-            (res) => {
-                let body = '';
-                res.on('data', (chunk) => {
-                    body += chunk.toString();
-                });
-                res.on('end', () => {
-                    if (res.statusCode && res.statusCode >= 200 && res.statusCode < 300) {
-                        try {
-                            resolve(body ? JSON.parse(body) : { ok: true });
-                        } catch {
-                            resolve({ ok: true });
+                (res) => {
+                    let body = '';
+                    res.on('data', (chunk) => {
+                        body += chunk.toString();
+                    });
+                    res.on('end', () => {
+                        if (res.statusCode && res.statusCode >= 200 && res.statusCode < 300) {
+                            try {
+                                resolve(body ? JSON.parse(body) : { ok: true });
+                            } catch {
+                                resolve({ ok: true });
+                            }
+                            return;
                         }
-                        return;
-                    }
-                    reject(new Error(`Upload failed (${res.statusCode}): ${body.slice(0, 200)}`));
-                });
-            }
-        );
+                        reject(new Error(`Upload failed (${res.statusCode}): ${body.slice(0, 200)}`));
+                    });
+                }
+            );
 
-        req.on('error', reject);
-        fs.createReadStream(filePath).pipe(req);
-    });
+            req.on('error', reject);
+            fs.createReadStream(uploadPath).pipe(req);
+        });
+    } finally {
+        if (tempPath) {
+            try {
+                fs.unlinkSync(tempPath);
+            } catch (e) {
+                console.warn('Failed to cleanup temp ciphertext:', tempPath);
+            }
+        }
+    }
 }
 
 // Exposer l'API au preload
@@ -187,8 +232,8 @@ ipcMain.handle('precompute', async () => {
 
 ipcMain.handle('uploadCiphertext', async (_event, payload) => {
     try {
-        const { filePath, contractId } = payload || {};
-        const result = await uploadCiphertext(filePath, contractId);
+        const { filePath, contractId, encryptionKeyHex } = payload || {};
+        const result = await uploadCiphertext(filePath, contractId, encryptionKeyHex);
         return { success: true, result };
     } catch (error) {
         return {

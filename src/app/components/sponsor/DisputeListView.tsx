@@ -2,14 +2,12 @@
 
 import Button from "../common/Button";
 import { useEffect, useState } from "react";
-import Modal from "../common/Modal";
 import SponsorModal from "./SponsorModal";
 import DisputeSimulationModal from "./DisputeSimulationModal";
 import FormSelect from "../common/FormSelect";
 import { ALL_PUBLIC_KEYS } from "@/app/lib/blockchain/config";
-import init, { check_argument, hex_to_bytes } from "@/app/lib/crypto_lib";
+import init, { hex_to_bytes } from "@/app/lib/crypto_lib";
 import {
-    getBasicInfo,
     sendSbFee,
     sendSvFee,
 } from "@/app/lib/blockchain/optimistic";
@@ -29,7 +27,6 @@ type Dispute = {
 };
 
 export default function DisputeListView() {
-    const [modalProofShown, showModalProof] = useState(false);
     const [modalSponsorShown, showModalSponsor] = useState(false);
     const [modalSimulationShown, showModalSimulation] = useState(false);
     const [sponsorType, setSponsorType] = useState<"buyer" | "vendor" | null>(null);
@@ -129,76 +126,6 @@ export default function DisputeListView() {
         fetchDisputes();
     };
 
-    const handleClickCheckArgument = async () => {
-        await init();
-
-        if (!selectedDispute) {
-            alert("something wrong happened!");
-            showModalProof(false);
-            return;
-        }
-
-        const isVendor = !!selectedDispute.pk_buyer_sponsor;
-        let endpoint = "/api/arguments/buyer";
-        if (isVendor) {
-            endpoint = "/api/arguments/vendor";
-        }
-
-        try {
-            const response = await fetch(`${endpoint}/${selectedDispute.contract_id}`);
-            if (!response.ok) {
-                throw new Error(`HTTP error! status: ${response.status}`);
-            }
-            const contentType = response.headers.get("content-type");
-            if (!contentType || !contentType.includes("application/json")) {
-                throw new Error("Response is not JSON");
-            }
-            const text = await response.text();
-            if (!text || text.trim() === "") {
-                throw new Error("Empty response from server");
-            }
-            const data = JSON.parse(text);
-            const { argument: argument_hex, description } = data;
-
-            const { key, commitment } = (await getBasicInfo(
-                selectedDispute.optimistic_smart_contract
-            ))!;
-
-            console.log(argument_hex);
-            const argument = hex_to_bytes(argument_hex);
-            console.log(argument);
-            const result = check_argument(argument, commitment, description, key);
-
-            // yandere dev core
-            if (result.error) {
-                alert(`An error occurred: ${result.error}`);
-            } else if (!result.is_valid) {
-                alert(
-                    `!!! Argument in NOT valid !!!\nThe ${
-                        isVendor ? "vendor" : "buyer"
-                    } may have lied`
-                );
-            } else if (result.supports_buyer) {
-                alert(
-                    isVendor
-                        ? "!!!Vendor posted an argument that DOES NOT SUPPORT them!!!"
-                        : "Buyer posted an argument that supports them"
-                );
-            } else {
-                alert(
-                    isVendor
-                        ? "Vendor posted an argument that supports them"
-                        : "!!!Buyer posted an argument that DOES NOT SUPPORT them!!!"
-                );
-            }
-        } catch (error: any) {
-            console.error("Error checking argument:", error);
-            alert(`Erreur lors de la vérification de l'argument: ${error?.message || "Unknown error"}`);
-        } finally {
-            showModalProof(false);
-        }
-    };
-
     const handleClickDownloadArgument = async (dispute: Dispute) => {
         try {
             await init();
@@ -256,8 +183,8 @@ export default function DisputeListView() {
                         <th className="p-2 w-1/6">Tip</th>
                         <th className="p-2 w-1/6">Buyer Sponsor</th>
                         <th className="p-2 w-1/6">Vendor Sponsor</th>
-                        <th className="p-2 w-1/6"></th>
-                        <th className="p-2 w-1/6"></th>
+                        <th className="p-2 w-1/12">Download</th>
+                        <th className="p-2 w-1/12">Simuler</th>
                     </tr>
                 </thead>
                 <tbody>
@@ -298,16 +225,6 @@ export default function DisputeListView() {
                                     />
                                 )}
                             </td>
-                            <td className="p-2 text-center w-1/6">
-                                <Button
-                                    label="Check argument"
-                                    onClick={() => {
-                                        setSelectedDispute(d);
-                                        showModalProof(true);
-                                    }}
-                                    width="full"
-                                />
-                            </td>
                             <td className="p-2 text-center w-1/12">
                                 <Button
                                     label="Download"
@@ -333,28 +250,6 @@ export default function DisputeListView() {
                     ))}
                 </tbody>
             </table>
-
-            {modalProofShown && (
-                <Modal
-                    onClose={() => showModalProof(false)}
-                    title="Check argument"
-                >
-                    <div className="flex gap-8 justify-between items-center">
-                        <Button
-                            label="Check here"
-                            onClick={handleClickCheckArgument}
-                        />
-                    </div>
-                    <br />
-                    <div className="flex gap-8 justify-between items-center">
-                        <Button
-                            label="Download argument"
-                            onClick={handleClickDownloadArgument}
-                            width="full"
-                        />
-                    </div>
-                </Modal>
-            )}
 
             {modalSponsorShown && sponsorType && (
                 <SponsorModal
